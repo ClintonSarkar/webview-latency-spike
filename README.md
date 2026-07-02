@@ -67,6 +67,14 @@ copies it to `user://` at startup (CEF needs a real file path, not a pack path).
 2. **Copy the whole `cef_artifacts/` folder next to the exported exe** — CEF's runtime
    (`gdCefRenderProcess.exe`, .pak files, locales) is not packed and is resolved beside
    the binary at runtime (same layout as gdcef's own shipped export example).
+3. **Target machine needs the MSVC runtime** — libgdcef.dll depends on MSVCP140.dll /
+   VCRUNTIME140.dll / VCRUNTIME140_1.dll. Install once: https://aka.ms/vs/17/release/vc_redist.x64.exe
+   (or copy those three x64 DLLs next to the exe). Without it the DLL fails with
+   `Error 126`, GDCef becomes a placeholder, and the app shows a grey page.
+
+The drag test loads automatically at startup (packed page → copied to `user://` → `file://`
+URL). Never type `res://` in the URL bar — CEF cannot read Godot pack paths; the Drag Test
+button does the copy + file:// dance for you.
 
 ## Test matrix
 

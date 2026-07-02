@@ -24,6 +24,11 @@ var mouse_pressed: bool = false
 
 func _ready() -> void:
 	_copy_test_page()
+	# placeholder node = libgdcef.dll failed to load (usually missing MSVC runtime)
+	if !$CEF.has_method("initialize"):
+		hud.text = "gdcef DLL failed to load — install VC++ redist: aka.ms/vs/17/release/vc_redist.x64.exe"
+		push_error("GDCef class missing: libgdcef.dll load failed (missing MSVCP140/VCRUNTIME140? install vc_redist.x64)")
+		return
 	if !$CEF.initialize({"incognito": true, "locale": "en-US"}):
 		hud.text = "CEF init FAILED: " + str($CEF.get_error())
 		push_error($CEF.get_error())
