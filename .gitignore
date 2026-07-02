@@ -8,3 +8,7 @@ bin/
 # CEF runtime droppings
 debug.log
 cache/
+
+# export output
+export/
+*.pck

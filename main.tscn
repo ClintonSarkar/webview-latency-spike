@@ -1,7 +1,7 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=3 format=3 uid="uid://cn37xvihlsu8e"]
 
-[ext_resource type="Script" path="res://main.gd" id="1"]
-[ext_resource type="Script" path="res://crosshair.gd" id="2"]
+[ext_resource type="Script" uid="uid://dprgjd73wsvb4" path="res://main.gd" id="1"]
+[ext_resource type="Script" uid="uid://3dhyjf1xgt8f" path="res://crosshair.gd" id="2"]
 
 [node name="main" type="Control"]
 layout_mode = 3
@@ -27,11 +27,11 @@ expand_mode = 3
 stretch_mode = 3
 
 [node name="topbar" type="PanelContainer" parent="."]
+self_modulate = Color(1, 1, 1, 0.85)
 layout_mode = 1
 anchors_preset = 10
 anchor_right = 1.0
 grow_horizontal = 2
-self_modulate = Color(1, 1, 1, 0.85)
 
 [node name="hbox" type="HBoxContainer" parent="topbar"]
 layout_mode = 2

@@ -56,6 +56,18 @@ event→frame ms inside the page.
 **Baseline:** open `dragtest.html` in Edge fullscreen on the same panel (it handles native
 touch). That is what "no webview pipeline" feels like — compare against it.
 
+## Exporting for the panel
+
+The Windows Desktop preset packs `dragtest.html` into the PCK (`include_filter="*.html"`),
+so the Drag Test button works in exported builds — `main.gd` reads it from `res://` and
+copies it to `user://` at startup (CEF needs a real file path, not a pack path).
+
+1. Export with the pinned editor (needs 4.4.1 export templates installed once):
+   `bin\Godot_v4.4.1-stable_win64_console.exe --path . --headless --export-release "Windows Desktop" <out>\webview-latency-spike.exe`
+2. **Copy the whole `cef_artifacts/` folder next to the exported exe** — CEF's runtime
+   (`gdCefRenderProcess.exe`, .pak files, locales) is not packed and is resolved beside
+   the binary at runtime (same layout as gdcef's own shipped export example).
+
 ## Test matrix
 
 Run each on the physical touch panel, fast drags and flicks, not slow ones:
