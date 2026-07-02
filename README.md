@@ -4,7 +4,7 @@ Standalone spike measuring **touch-drag latency of a web page rendered through g
 (CPU off-screen rendering → Godot texture) on Godot 4.4.1**, on a Windows touch panel.
 
 **Question it answers:** is CPU-OSR latency acceptable for an air-hockey-style drag game
-before we commit to a gdcef multi-touch fork and signager integration?
+before committing to a gdcef multi-touch fork and integrating into the host application?
 
 This is spike-only. No signage integration here. Single pointer only (latency, not multitouch).
 
@@ -121,7 +121,10 @@ Also note CPU % (Task Manager: this app + `gdCefRenderProcess`) during test 2.
 
 ## Context
 
-Decision history lives with the signager webview-background investigation (2026-06/07):
-gdcef is the only texture-rendering webview family on 4.4.1; it has no touch API (mouse-only,
-single pointer), so multi-touch requires forking it to map Godot's per-finger
-`InputEventScreenTouch.index` → CEF `SendTouchEvent`. This spike gates that fork on latency.
+Background: this harness gates an integration where an existing multi-touch web game runs
+as an interactive background layer inside a Godot app, beneath alpha overlays composited
+on top. That layering rules out OS-native webview overlays (always top-most) — only
+texture-rendering CEF embeds work, and on Godot 4.4.1 that means gdcef v0.17.0. Stock gdcef
+has no touch API (mouse-only, single pointer), so multi-touch required forking it to map
+Godot's per-finger `InputEventScreenTouch.index` → CEF `SendTouchEvent`. This spike first
+gated the fork on latency (passed at 60 fps on hardware), then verified the fork end-to-end.
