@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>drag latency test</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #101418; touch-action: none; user-select: none; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// Puck follows the pointer with ZERO easing while held, so any visible gap
+// between finger/crosshair and puck is pipeline latency, not game smoothing.
+// Works with mouse events (what gdcef forwards) AND native touch, so the same
+// page doubles as a native-browser baseline (open it in Edge on the panel).
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+let W = 0, H = 0;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+resize();
+
+const pointer = { x: W / 2, y: H / 2, down: false };
+const puck = { x: W / 2, y: H / 2, r: 60, held: false };
+let followMode = true; // true: puck sticks to pointer while down; false: must grab the puck
+const trail = [];      // recent pointer positions {x, y, t}
+
+let moveEvents = 0, moveHz = 0, lastMoveT = 0, lastHzT = performance.now();
+let frames = 0, fps = 0, lastFpsT = performance.now();
+let evToFrameMs = 0;
+
+const btn = { x: 0, y: 8, w: 190, h: 42 }; // mode toggle, top-right (position set per frame)
+
+function onDown(x, y) {
+  pointer.x = x; pointer.y = y; pointer.down = true;
+  if (followMode || Math.hypot(x - puck.x, y - puck.y) <= puck.r * 1.4) puck.held = true;
+  if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+    followMode = !followMode;
+    puck.held = false;
+  }
+}
+function onMove(x, y) {
+  pointer.x = x; pointer.y = y;
+  moveEvents++;
+  lastMoveT = performance.now();
+  trail.push({ x: x, y: y, t: lastMoveT });
+  while (trail.length > 24) trail.shift();
+}
+function onUp() { pointer.down = false; puck.held = false; }
+
+window.addEventListener("pointerdown", e => { e.preventDefault(); onDown(e.clientX, e.clientY); });
+window.addEventListener("pointermove", e => { e.preventDefault(); onMove(e.clientX, e.clientY); });
+window.addEventListener("pointerup",   e => { e.preventDefault(); onUp(); });
+window.addEventListener("pointercancel", () => onUp());
+// touch fallback for browsers without pointer events on touch
+window.addEventListener("touchstart", e => { e.preventDefault(); const t = e.touches[0]; onDown(t.clientX, t.clientY); }, { passive: false });
+window.addEventListener("touchmove",  e => { e.preventDefault(); const t = e.touches[0]; onMove(t.clientX, t.clientY); }, { passive: false });
+window.addEventListener("touchend",   e => { e.preventDefault(); onUp(); }, { passive: false });
+
+function draw() {
+  const now = performance.now();
+  frames++;
+  if (now - lastFpsT >= 1000) { fps = frames; frames = 0; lastFpsT = now; }
+  if (now - lastHzT >= 1000) { moveHz = moveEvents; moveEvents = 0; lastHzT = now; }
+  if (pointer.down) evToFrameMs = now - lastMoveT;
+
+  if (puck.held) { puck.x = pointer.x; puck.y = pointer.y; }
+
+  ctx.clearRect(0, 0, W, H);
+
+  // grid
+  ctx.strokeStyle = "#1d2530";
+  ctx.lineWidth = 1;
+  for (let gx = 0; gx < W; gx += 120) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
+  for (let gy = 0; gy < H; gy += 120) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
+
+  // pointer trail, fading
+  for (let i = 0; i < trail.length; i++) {
+    const p = trail[i];
+    const a = (i + 1) / trail.length * 0.5;
+    ctx.fillStyle = "rgba(90, 170, 255, " + a + ")";
+    ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // puck
+  ctx.fillStyle = puck.held ? "#ff5252" : "#2ecc71";
+  ctx.beginPath(); ctx.arc(puck.x, puck.y, puck.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#0c0f12";
+  ctx.beginPath(); ctx.arc(puck.x, puck.y, puck.r * 0.55, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = puck.held ? "#ff5252" : "#2ecc71";
+  ctx.beginPath(); ctx.arc(puck.x, puck.y, puck.r * 0.2, 0, Math.PI * 2); ctx.fill();
+
+  // HUD
+  ctx.font = "26px Consolas, monospace";
+  ctx.fillStyle = "#e8eef4";
+  ctx.fillText("page fps      " + fps, 20, 44);
+  ctx.fillText("move ev/s     " + moveHz, 20, 78);
+  ctx.fillText("ev->frame ms  " + evToFrameMs.toFixed(1), 20, 112);
+  ctx.fillText("pointer       " + pointer.x.toFixed(0) + "," + pointer.y.toFixed(0) + (pointer.down ? " DOWN" : ""), 20, 146);
+  ctx.fillStyle = "#7f93a8";
+  ctx.font = "20px Consolas, monospace";
+  ctx.fillText(followMode ? "FOLLOW: press anywhere, puck sticks to pointer" : "GRAB: press ON the puck to drag it", 20, 182);
+
+  // mode button
+  btn.x = W - btn.w - 16;
+  ctx.fillStyle = "#26313e";
+  ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.strokeStyle = "#4a5a6d";
+  ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.fillStyle = "#e8eef4";
+  ctx.fillText(followMode ? "mode: FOLLOW" : "mode: GRAB", btn.x + 14, btn.y + 28);
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# Godot
+.godot/
+
+# Fetched by fetch-artifacts.ps1 — never commit (~650MB)
+cef_artifacts/
+bin/
+
+# CEF runtime droppings
+debug.log
+cache/
