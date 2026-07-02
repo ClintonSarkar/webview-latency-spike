@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>drag latency test</title>
+<title>touches:0</title>
 <style>
   html, body { margin: 0; padding: 0; overflow: hidden; background: #101418; touch-action: none; user-select: none; }
   canvas { display: block; }
@@ -13,10 +13,11 @@
 <canvas id="c"></canvas>
 <script>
 "use strict";
-// Puck follows the pointer with ZERO easing while held, so any visible gap
+// Pucks follow their contact with ZERO easing while held, so any visible gap
 // between finger/crosshair and puck is pipeline latency, not game smoothing.
-// Works with mouse events (what gdcef forwards) AND native touch, so the same
-// page doubles as a native-browser baseline (open it in Edge on the panel).
+// Multi-touch: one contact per finger, via pointer events (pointerType 'touch')
+// or the touch* fallback; the mouse keeps the original single-pointer behavior.
+// document.title is "touches:<N active fingers>" — a Godot-side selftest reads it.
 
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
@@ -29,10 +30,25 @@ function resize() {
 window.addEventListener("resize", resize);
 resize();
 
-const pointer = { x: W / 2, y: H / 2, down: false };
-const puck = { x: W / 2, y: H / 2, r: 60, held: false };
-let followMode = true; // true: puck sticks to pointer while down; false: must grab the puck
-const trail = [];      // recent pointer positions {x, y, t}
+const pointer = { x: W / 2, y: H / 2, down: false }; // last event position, for the HUD
+const PUCK_R = 60;
+let followMode = true; // true: press anywhere, puck sticks to the contact; false: must press within a puck
+
+// persistent puck pool for GRAB mode (mouse FOLLOW borrows the nearest free one)
+const pucks = [];
+for (let i = 0; i < 4; i++) pucks.push({ x: W * (i + 1) / 5, y: H / 2, r: PUCK_R, heldBy: null });
+
+// active contacts: 'mouse' | 'p'+pointerId (pointer-touch) | 't'+touch.identifier (touch fallback)
+// prefixes keep the two numeric id spaces from ever colliding
+const contacts = new Map();
+let hueSeed = 0;
+
+// double-count guard: once pointer events prove they cover touch, the touch*
+// fallback is ignored for good, and any contacts it already created are dropped
+let pointerTouchAdopted = false;
+
+const trail = [];      // mouse trail {x, y}
+const deadTrails = []; // finger trails fading out after release {hue, pts, t0}
 
 let moveEvents = 0, moveHz = 0, lastMoveT = 0, lastHzT = performance.now();
 let frames = 0, fps = 0, lastFpsT = performance.now();
@@ -40,31 +56,153 @@ let evToFrameMs = 0;
 
 const btn = { x: 0, y: 8, w: 190, h: 42 }; // mode toggle, top-right (position set per frame)
 
-function onDown(x, y) {
+function fingerCount() {
+  let n = 0;
+  contacts.forEach(c => { if (c.isFinger) n++; });
+  return n;
+}
+function updateTitle() { document.title = "touches:" + fingerCount(); }
+updateTitle();
+
+function nearestFreePuck(x, y, maxDist) {
+  let best = null, bestD = maxDist;
+  for (const p of pucks) {
+    if (p.heldBy !== null) continue;
+    const d = Math.hypot(x - p.x, y - p.y);
+    if (d <= bestD) { best = p; bestD = d; }
+  }
+  return best;
+}
+
+function releaseAllPucks() {
+  contacts.forEach(c => { c.puck = null; c.eph = null; });
+  for (const p of pucks) p.heldBy = null;
+}
+
+function downContact(key, x, y, isFinger, src) {
   pointer.x = x; pointer.y = y; pointer.down = true;
-  if (followMode || Math.hypot(x - puck.x, y - puck.y) <= puck.r * 1.4) puck.held = true;
+  let c = contacts.get(key);
+  if (!c) {
+    hueSeed = (hueSeed + 77) % 360;
+    c = { key: key, src: src, isFinger: isFinger, x: x, y: y, hue: hueSeed, puck: null, eph: null, trail: [] };
+    contacts.set(key, c);
+    if (isFinger) updateTitle();
+  } else { c.x = x; c.y = y; }
   if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
     followMode = !followMode;
-    puck.held = false;
+    releaseAllPucks();
+    return;
+  }
+  if (c.puck || c.eph) return;
+  if (followMode) {
+    if (isFinger) c.eph = { x: x, y: y, r: PUCK_R }; // dedicated puck for this finger
+    else {
+      const p = nearestFreePuck(x, y, Infinity);
+      if (p) { p.heldBy = key; c.puck = p; }
+    }
+  } else {
+    const p = nearestFreePuck(x, y, PUCK_R * 1.4);
+    if (p) { p.heldBy = key; c.puck = p; }
   }
 }
-function onMove(x, y) {
+
+function moveContact(key, x, y) {
+  const c = contacts.get(key);
+  if (!c) return;
+  c.x = x; c.y = y;
+  if (c.isFinger) {
+    c.trail.push({ x: x, y: y });
+    while (c.trail.length > 16) c.trail.shift();
+  }
+}
+
+function removeContact(key) {
+  const c = contacts.get(key);
+  if (!c) return;
+  if (c.puck) c.puck.heldBy = null;
+  if (c.isFinger && c.trail.length) deadTrails.push({ hue: c.hue, pts: c.trail, t0: performance.now() });
+  contacts.delete(key);
+  pointer.down = contacts.size > 0;
+  if (c.isFinger) updateTitle();
+}
+
+function adoptPointerTouch() {
+  if (pointerTouchAdopted) return;
+  pointerTouchAdopted = true;
+  // touch* may have fired first for the same physical contact — drop its entries,
+  // the pointer stream owns them from here on
+  const stale = [];
+  contacts.forEach((c, k) => { if (c.src === "touch") stale.push(k); });
+  for (const k of stale) removeContact(k);
+}
+
+function noteMove(x, y) {
   pointer.x = x; pointer.y = y;
   moveEvents++;
   lastMoveT = performance.now();
-  trail.push({ x: x, y: y, t: lastMoveT });
-  while (trail.length > 24) trail.shift();
 }
-function onUp() { pointer.down = false; puck.held = false; }
 
-window.addEventListener("pointerdown", e => { e.preventDefault(); onDown(e.clientX, e.clientY); });
-window.addEventListener("pointermove", e => { e.preventDefault(); onMove(e.clientX, e.clientY); });
-window.addEventListener("pointerup",   e => { e.preventDefault(); onUp(); });
-window.addEventListener("pointercancel", () => onUp());
-// touch fallback for browsers without pointer events on touch
-window.addEventListener("touchstart", e => { e.preventDefault(); const t = e.touches[0]; onDown(t.clientX, t.clientY); }, { passive: false });
-window.addEventListener("touchmove",  e => { e.preventDefault(); const t = e.touches[0]; onMove(t.clientX, t.clientY); }, { passive: false });
-window.addEventListener("touchend",   e => { e.preventDefault(); onUp(); }, { passive: false });
+window.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  if (e.pointerType === "touch") { adoptPointerTouch(); downContact("p" + e.pointerId, e.clientX, e.clientY, true, "pointer"); }
+  else downContact("mouse", e.clientX, e.clientY, false, "pointer");
+});
+window.addEventListener("pointermove", e => {
+  e.preventDefault();
+  noteMove(e.clientX, e.clientY);
+  if (e.pointerType === "touch") { adoptPointerTouch(); moveContact("p" + e.pointerId, e.clientX, e.clientY); }
+  else {
+    moveContact("mouse", e.clientX, e.clientY);
+    trail.push({ x: e.clientX, y: e.clientY });
+    while (trail.length > 24) trail.shift();
+  }
+});
+window.addEventListener("pointerup", e => {
+  e.preventDefault();
+  if (e.pointerType === "touch") { adoptPointerTouch(); removeContact("p" + e.pointerId); }
+  else removeContact("mouse");
+});
+window.addEventListener("pointercancel", e => {
+  if (e.pointerType === "touch") { adoptPointerTouch(); removeContact("p" + e.pointerId); }
+  else removeContact("mouse");
+});
+
+// touch fallback for engines without pointer events on touch
+window.addEventListener("touchstart", e => {
+  e.preventDefault();
+  if (pointerTouchAdopted) return;
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    downContact("t" + t.identifier, t.clientX, t.clientY, true, "touch");
+  }
+}, { passive: false });
+window.addEventListener("touchmove", e => {
+  e.preventDefault();
+  if (pointerTouchAdopted) return;
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    noteMove(t.clientX, t.clientY);
+    moveContact("t" + t.identifier, t.clientX, t.clientY);
+  }
+}, { passive: false });
+window.addEventListener("touchend", e => {
+  e.preventDefault();
+  if (pointerTouchAdopted) return;
+  for (let i = 0; i < e.changedTouches.length; i++) removeContact("t" + e.changedTouches[i].identifier);
+}, { passive: false });
+window.addEventListener("touchcancel", e => {
+  if (pointerTouchAdopted) return;
+  for (let i = 0; i < e.changedTouches.length; i++) removeContact("t" + e.changedTouches[i].identifier);
+}, { passive: false });
+
+function drawPuck(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#0c0f12";
+  ctx.beginPath(); ctx.arc(x, y, r * 0.55, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(x, y, r * 0.2, 0, Math.PI * 2); ctx.fill();
+}
 
 function draw() {
   const now = performance.now();
@@ -73,7 +211,11 @@ function draw() {
   if (now - lastHzT >= 1000) { moveHz = moveEvents; moveEvents = 0; lastHzT = now; }
   if (pointer.down) evToFrameMs = now - lastMoveT;
 
-  if (puck.held) { puck.x = pointer.x; puck.y = pointer.y; }
+  // ZERO easing: held pucks snap to their contact every frame
+  contacts.forEach(c => {
+    if (c.puck) { c.puck.x = c.x; c.puck.y = c.y; }
+    if (c.eph)  { c.eph.x = c.x;  c.eph.y = c.y; }
+  });
 
   ctx.clearRect(0, 0, W, H);
 
@@ -83,7 +225,7 @@ function draw() {
   for (let gx = 0; gx < W; gx += 120) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
   for (let gy = 0; gy < H; gy += 120) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
 
-  // pointer trail, fading
+  // mouse trail, fading
   for (let i = 0; i < trail.length; i++) {
     const p = trail[i];
     const a = (i + 1) / trail.length * 0.5;
@@ -91,13 +233,34 @@ function draw() {
     ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
   }
 
-  // puck
-  ctx.fillStyle = puck.held ? "#ff5252" : "#2ecc71";
-  ctx.beginPath(); ctx.arc(puck.x, puck.y, puck.r, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = "#0c0f12";
-  ctx.beginPath(); ctx.arc(puck.x, puck.y, puck.r * 0.55, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = puck.held ? "#ff5252" : "#2ecc71";
-  ctx.beginPath(); ctx.arc(puck.x, puck.y, puck.r * 0.2, 0, Math.PI * 2); ctx.fill();
+  // live finger trails, one hue per finger
+  contacts.forEach(c => {
+    if (!c.isFinger) return;
+    for (let i = 0; i < c.trail.length; i++) {
+      const p = c.trail[i];
+      const a = (i + 1) / c.trail.length * 0.5;
+      ctx.fillStyle = "hsla(" + c.hue + ", 85%, 65%, " + a + ")";
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+    }
+  });
+
+  // released finger trails fade out over 600ms
+  for (let i = deadTrails.length - 1; i >= 0; i--) {
+    const dt = deadTrails[i];
+    const k = 1 - (now - dt.t0) / 600;
+    if (k <= 0) { deadTrails.splice(i, 1); continue; }
+    for (let j = 0; j < dt.pts.length; j++) {
+      const p = dt.pts[j];
+      const a = (j + 1) / dt.pts.length * 0.5 * k;
+      ctx.fillStyle = "hsla(" + dt.hue + ", 85%, 65%, " + a + ")";
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // pool pucks
+  for (const p of pucks) drawPuck(p.x, p.y, p.r, p.heldBy !== null ? "#ff5252" : "#2ecc71");
+  // per-finger FOLLOW pucks
+  contacts.forEach(c => { if (c.eph) drawPuck(c.eph.x, c.eph.y, c.eph.r, "hsl(" + c.hue + ", 85%, 60%)"); });
 
   // HUD
   ctx.font = "26px Consolas, monospace";
@@ -106,9 +269,10 @@ function draw() {
   ctx.fillText("move ev/s     " + moveHz, 20, 78);
   ctx.fillText("ev->frame ms  " + evToFrameMs.toFixed(1), 20, 112);
   ctx.fillText("pointer       " + pointer.x.toFixed(0) + "," + pointer.y.toFixed(0) + (pointer.down ? " DOWN" : ""), 20, 146);
+  ctx.fillText("fingers       " + fingerCount(), 20, 180);
   ctx.fillStyle = "#7f93a8";
   ctx.font = "20px Consolas, monospace";
-  ctx.fillText(followMode ? "FOLLOW: press anywhere, puck sticks to pointer" : "GRAB: press ON the puck to drag it", 20, 182);
+  ctx.fillText(followMode ? "FOLLOW: press anywhere, puck sticks to pointer" : "GRAB: press ON a puck to drag it", 20, 216);
 
   // mode button
   btn.x = W - btn.w - 16;

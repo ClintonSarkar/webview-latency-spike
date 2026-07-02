@@ -76,6 +76,28 @@ The drag test loads automatically at startup (packed page → copied to `user://
 URL). Never type `res://` in the URL bar — CEF cannot read Godot pack paths; the Drag Test
 button does the copy + file:// dance for you.
 
+## Multi-touch
+
+The stock gdcef v0.17.0 dll is single-pointer (mouse only). This spike also supports a
+**forked dll** ([ClintonSarkar/gdcef](https://github.com/ClintonSarkar/gdcef), branch
+`multitouch-v0.17`) that adds per-finger `set_touch_down/move/up/cancel` wrapping CEF's
+`SendTouchEvent`. The spike auto-detects it at startup (`MULTITOUCH_API: true/false` in the
+console) — with the fork, Input:Touch mode forwards each finger separately and the page
+receives real multi-point `touchstart`/`touchmove`/`touchend` (up to 16 fingers, CEF limit).
+dragtest.html gives each finger its own puck and reports `fingers N` in the HUD.
+
+**Rebuild the dll** (Windows, VS2022 + Python + scons): clone the fork, checkout
+`multitouch-v0.17`, `pip install -r requirements.txt`, run `python build.py` from a VS x64
+dev prompt in `addons/gdcef/` (note: its post-build demo-symlink step needs admin and may
+fail — harmless, the dll is already built at `<repo>/cef_artifacts/libgdcef.dll`). Then copy
+**only `libgdcef.dll`** over `cef_artifacts/libgdcef.dll` here (stock kept as
+`libgdcef.dll.stock`). For exported builds, also replace the `libgdcef.dll` sitting next to
+the exported exe. Nothing else changes (same CEF 131, same artifacts).
+
+**Automated check**: `bin\Godot_v4.4.1-stable_win64_console.exe --path . -- --touch-selftest`
+injects two synthetic fingers and verifies the page counts them via `document.title`;
+prints `TOUCH_SELFTEST_PASS`/`FAIL` and exits 0/1.
+
 ## Test matrix
 
 Run each on the physical touch panel, fast drags and flicks, not slow ones:

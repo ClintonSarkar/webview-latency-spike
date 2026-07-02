@@ -21,21 +21,40 @@ var frame_rate: int = 30
 # false = rely on Godot's emulate_mouse_from_touch synthesized mouse events
 var touch_direct: bool = true
 var mouse_pressed: bool = false
+# forked dll exposes per-finger set_touch_down/move/up; stock dll does not
+var has_touch_api: bool = false
+var selftest: bool = false
+var selftest_started: bool = false
+# live fingers (index -> last position), so recreate/focus-loss can cancel them
+var active_touches: Dictionary = {}
 
 func _ready() -> void:
+	selftest = OS.get_cmdline_args().has("--touch-selftest") || OS.get_cmdline_user_args().has("--touch-selftest")
 	_copy_test_page()
 	# placeholder node = libgdcef.dll failed to load (usually missing MSVC runtime)
 	if !$CEF.has_method("initialize"):
 		hud.text = "gdcef DLL failed to load — install VC++ redist: aka.ms/vs/17/release/vc_redist.x64.exe"
 		push_error("GDCef class missing: libgdcef.dll load failed (missing MSVCP140/VCRUNTIME140? install vc_redist.x64)")
+		_fail_selftest("gdcef dll failed to load")
 		return
 	if !$CEF.initialize({"incognito": true, "locale": "en-US"}):
 		hud.text = "CEF init FAILED: " + str($CEF.get_error())
 		push_error($CEF.get_error())
+		_fail_selftest("CEF initialize failed")
 		return
 	print("CEF version: " + $CEF.get_full_version())
 	browser = await _create_browser(_test_page_url(), frame_rate)
+	if browser != null:
+		print("MULTITOUCH_API: " + str(browser.has_method("set_touch_down")))
+	else:
+		_fail_selftest("browser creation failed")
 	_update_labels()
+
+# selftest must exit 1 on broken boots, never hang for an unattended runner
+func _fail_selftest(reason: String) -> void:
+	if selftest:
+		print("TOUCH_SELFTEST_FAIL: " + reason)
+		get_tree().quit(1)
 
 func _copy_test_page() -> void:
 	var src = FileAccess.open(TEST_PAGE_SRC, FileAccess.READ)
@@ -67,15 +86,56 @@ func _create_browser(url: String, fps: int):
 	b.connect("on_page_loaded", _on_page_loaded)
 	b.connect("on_page_failed_loading", _on_page_failed)
 	b.resize(view.get_size())
+	has_touch_api = b.has_method("set_touch_down")
 	return b
 
 func _on_page_loaded(b) -> void:
 	url_edit.text = b.get_url()
 	print("loaded: " + b.get_url())
+	if selftest && !selftest_started:
+		selftest_started = true
+		_run_touch_selftest()
 
 func _on_page_failed(err_code, err_msg, b) -> void:
 	var html = "<html><body bgcolor=\"white\"><h2>Failed to load %s</h2><p>%s (%s)</p></body></html>" % [b.get_url(), err_msg, str(err_code)]
 	b.load_data_uri(html, "text/html")
+
+####
+#### Touch selftest (--touch-selftest): 2-finger down/drag/up, verified via page title
+####
+
+func _run_touch_selftest() -> void:
+	# give the page JS time to settle before injecting touches
+	await get_tree().create_timer(1.0).timeout
+	if !has_touch_api:
+		print("TOUCH_SELFTEST_FAIL: no multitouch API")
+		get_tree().quit(1)
+		return
+	browser.set_touch_down(0, 600, 500)
+	browser.set_touch_down(1, 1200, 500)
+	for i in range(10):
+		await get_tree().process_frame
+		browser.set_touch_move(0, 600 + i * 5, 500 + i * 3)
+		browser.set_touch_move(1, 1200 - i * 5, 500 + i * 3)
+	if !await _wait_for_title("touches:2"):
+		return
+	browser.set_touch_up(0, 645, 527)
+	browser.set_touch_up(1, 1155, 527)
+	if !await _wait_for_title("touches:0"):
+		return
+	print("TOUCH_SELFTEST_PASS")
+	get_tree().quit(0)
+
+func _wait_for_title(want: String) -> bool:
+	var last = ""
+	for i in range(180):
+		await get_tree().process_frame
+		last = str(browser.get_title())
+		if last.contains(want):
+			return true
+	print("TOUCH_SELFTEST_FAIL: timed out waiting for title '%s', last title '%s'" % [want, last])
+	get_tree().quit(1)
+	return false
 
 ####
 #### URL bar / buttons
@@ -113,10 +173,23 @@ func _toggle_frame_rate() -> void:
 	var url = _test_page_url()
 	if browser != null:
 		url = browser.get_url()
+		_cancel_all_touches()
 		browser.close()
 		browser = null
 	browser = await _create_browser(url, frame_rate)
 	_update_labels()
+
+func _cancel_all_touches() -> void:
+	if browser != null && has_touch_api:
+		for idx in active_touches:
+			browser.set_touch_cancel(idx)
+	active_touches.clear()
+	crosshair.clear_touches()
+
+# a finger held across focus loss would stay pressed in CEF forever
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		_cancel_all_touches()
 
 func _update_labels() -> void:
 	fr_btn.text = "FR:%d" % frame_rate
@@ -127,21 +200,46 @@ func _update_labels() -> void:
 ####
 
 func _on_view_gui_input(event) -> void:
-	if browser == null:
-		return
 	if event is InputEventScreenTouch:
-		crosshair.set_point(event.position, event.pressed)
+		if event.pressed:
+			active_touches[event.index] = event.position
+		else:
+			active_touches.erase(event.index)
+		# emulated mode: the synthesized mouse draws the single -1 ring instead
 		if touch_direct:
+			crosshair.set_finger(event.index, event.position, event.pressed)
+		if browser == null || !touch_direct:
+			return
+		if has_touch_api:
+			if event.pressed:
+				browser.set_touch_down(event.index, event.position.x, event.position.y)
+			elif event.canceled:
+				browser.set_touch_cancel(event.index)
+			else:
+				browser.set_touch_up(event.index, event.position.x, event.position.y)
+		else:
+			# stock dll: collapse touches onto the mouse
 			browser.set_mouse_moved(event.position.x, event.position.y)
 			if event.pressed:
 				browser.set_mouse_left_down()
 			else:
 				browser.set_mouse_left_up()
-	elif event is InputEventScreenDrag:
-		crosshair.set_point(event.position, true)
+		return
+	if event is InputEventScreenDrag:
+		if active_touches.has(event.index):
+			active_touches[event.index] = event.position
 		if touch_direct:
+			crosshair.set_finger(event.index, event.position, true)
+		if browser == null || !touch_direct:
+			return
+		if has_touch_api:
+			browser.set_touch_move(event.index, event.position.x, event.position.y)
+		else:
 			browser.set_mouse_moved(event.position.x, event.position.y)
-	elif event is InputEventMouseButton:
+		return
+	if browser == null:
+		return
+	if event is InputEventMouseButton:
 		# in touch-direct mode, drop the synthesized mouse to avoid double-forwarding
 		if touch_direct && event.device == InputEvent.DEVICE_ID_EMULATION:
 			return
@@ -151,7 +249,7 @@ func _on_view_gui_input(event) -> void:
 			browser.set_mouse_wheel_vertical(-2)
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			mouse_pressed = event.pressed
-			crosshair.set_point(event.position, event.pressed)
+			crosshair.set_finger(-1, event.position, event.pressed)
 			if mouse_pressed:
 				browser.set_mouse_left_down()
 			else:
@@ -164,7 +262,7 @@ func _on_view_gui_input(event) -> void:
 	elif event is InputEventMouseMotion:
 		if touch_direct && event.device == InputEvent.DEVICE_ID_EMULATION:
 			return
-		crosshair.set_point(event.position, mouse_pressed)
+		crosshair.set_finger(-1, event.position, mouse_pressed)
 		if mouse_pressed:
 			browser.set_mouse_left_down()
 		browser.set_mouse_moved(event.position.x, event.position.y)
@@ -207,4 +305,4 @@ func _toggle_fullscreen() -> void:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 
 func _process(_delta: float) -> void:
-	hud.text = " %d fps | F1 input F2 fr F3 xhair F11 fs Esc quit" % Engine.get_frames_per_second()
+	hud.text = " %d fps | %d fingers | F1 input F2 fr F3 xhair F11 fs Esc quit" % [Engine.get_frames_per_second(), crosshair.down_count()]
