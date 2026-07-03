@@ -98,6 +98,26 @@ the exported exe. Nothing else changes (same CEF 131, same artifacts).
 injects two synthetic fingers and verifies the page counts them via `document.title`;
 prints `TOUCH_SELFTEST_PASS`/`FAIL` and exits 0/1.
 
+## Latency tuning
+
+The webview's input-to-photon chain has more stages than a native browser:
+finger → Godot input → IPC to Chromium → offscreen paint (≤60fps, CEF hard cap) →
+CPU convert + texture upload → Godot frame → present. The project runs every stage
+in its low-latency configuration:
+
+- `vsync_mode=0` — removes up to a frame of present-queue delay
+- `run/max_fps=120` — input sampled and texture presented on an 8.3ms quantum
+  (the browser still paints at most 60fps; the win is fresher sampling/display legs)
+- `agile_event_flushing=true` + `Input.set_use_accumulated_input(false)` — touch
+  moves forwarded per raw event instead of merged once per frame
+- browser `frame_rate` defaults to 60 (F2 drops it to 30 for comparison only)
+
+Remaining gap vs a native browser is structural to CPU off-screen rendering
+(CEF paints on its own 60Hz timer, unsynchronized with Godot's loop, then the
+frame is composited one Godot frame later). Escalation paths if still not
+acceptable: CEF external begin-frame scheduling (sync Chromium paints to the
+Godot loop), then the GPU shared-texture OSR path (no CPU round-trip at all).
+
 ## Test matrix
 
 Run each on the physical touch panel, fast drags and flicks, not slow ones:

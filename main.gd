@@ -16,7 +16,7 @@ const TEST_PAGE_DST = "user://dragtest.html"
 @onready var crosshair: Node2D = $crosshair
 
 var browser = null
-var frame_rate: int = 30
+var frame_rate: int = 60
 # true = forward InputEventScreenTouch/Drag directly (production-representative);
 # false = rely on Godot's emulate_mouse_from_touch synthesized mouse events
 var touch_direct: bool = true
@@ -30,6 +30,8 @@ var active_touches: Dictionary = {}
 
 func _ready() -> void:
 	selftest = OS.get_cmdline_args().has("--touch-selftest") || OS.get_cmdline_user_args().has("--touch-selftest")
+	# raw per-event touch delivery instead of one merged move per frame
+	Input.set_use_accumulated_input(false)
 	_copy_test_page()
 	# placeholder node = libgdcef.dll failed to load (usually missing MSVC runtime)
 	if !$CEF.has_method("initialize"):
