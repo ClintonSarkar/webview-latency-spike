@@ -39,7 +39,13 @@ func _ready() -> void:
 		push_error("GDCef class missing: libgdcef.dll load failed (missing MSVCP140/VCRUNTIME140? install vc_redist.x64)")
 		_fail_selftest("gdcef dll failed to load")
 		return
-	if !$CEF.initialize({"incognito": true, "locale": "en-US"}):
+	# --software falls back to SwiftShader if GPU OSR misbehaves on a machine
+	var gpu = !OS.get_cmdline_args().has("--software")
+	if !$CEF.initialize({
+		"incognito": false,
+		"locale": "en-US",
+		"enable_gpu": gpu,
+	}):
 		hud.text = "CEF init FAILED: " + str($CEF.get_error())
 		push_error($CEF.get_error())
 		_fail_selftest("CEF initialize failed")
